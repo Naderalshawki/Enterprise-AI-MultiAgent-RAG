@@ -250,7 +250,7 @@ PROVIDER_CONFIG = {
     ProviderName.GEMINI: {
     "env": "GEMINI_API_KEY",
     "model_env": "GEMINI_MODEL",
-    "default_model": "gemini-3.8-flash",
+    "default_model": "gemini-3.6-flash",
     "requires_api_key": True,
     },
 
