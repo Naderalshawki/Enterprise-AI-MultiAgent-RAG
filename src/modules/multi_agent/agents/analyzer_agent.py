@@ -51,7 +51,7 @@ class AnalyzerAgent(BaseAgent):
         # إذا كان المزود جيميناي، نتجاهل أي قيم قديمة ممررة من الـ Planner 
         # ونجبره على استخدام الموديل الصحيح أو الأحدث
         if self._provider and self._provider.name.upper() == "GEMINI":
-            self._model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+            self._model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         else:
             self._model = (
                 default_model
