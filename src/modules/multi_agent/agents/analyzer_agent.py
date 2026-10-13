@@ -47,10 +47,16 @@ class AnalyzerAgent(BaseAgent):
             else self._resolve_provider()
         )
 
-        self._model = (
-            default_model
-            or self._resolve_model(self._provider)
-        )
+        # --- التعديل الجذري هنا ---
+        # إذا كان المزود جيميناي، نتجاهل أي قيم قديمة ممررة من الـ Planner 
+        # ونجبره على استخدام الموديل الصحيح أو الأحدث
+        if self._provider and self._provider.name.upper() == "GEMINI":
+            self._model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+        else:
+            self._model = (
+                default_model
+                or self._resolve_model(self._provider)
+            )
 
     @staticmethod
     def _resolve_provider() -> ProviderName:
