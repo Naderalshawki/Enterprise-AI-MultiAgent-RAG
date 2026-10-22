@@ -445,7 +445,7 @@ Supabase / PostgreSQL
           ┌──────────────┼──────────────┐
           │              │              │
           ▼              ▼              ▼
-        Groq          DeepSeek       Gemini
+        GEMINI          DeepSeek       Gemini
           │              │              │
           └──────────────┼──────────────┘
                          │
@@ -998,7 +998,7 @@ DATABASE_URL=your_supabase_postgresql_url
 
 LLM_PROVIDER=gemini
 
-GROQ_API_KEY=your_api_key
+GEMINI_API_KEY=your_api_key
 
 DEEPSEEK_API_KEY=your_api_key
 

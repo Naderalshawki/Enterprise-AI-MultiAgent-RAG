@@ -1,0 +1,3 @@
+{"tenant_id":"org_a","query":"كم يوماً يسمح بالعمل عن بعد؟","relevant_document_ids":["remote_policy"]}
+{"tenant_id":"org_a","query":"ما مدة الإجازة السنوية؟","relevant_document_ids":["leave_policy"]}
+{"tenant_id":"org_b","query":"ما قواعد كلمة المرور؟","relevant_document_ids":["security_policy"]}
