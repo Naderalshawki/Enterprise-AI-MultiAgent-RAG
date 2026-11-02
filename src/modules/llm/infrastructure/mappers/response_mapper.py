@@ -74,7 +74,7 @@ class ResponseMapper:
 
         return LLMResponse(
             content=response.text,
-            provider=ProviderName.GEMINI,
+            provider=ProviderName.OLLAMA,
             model=model,
             usage=TokenUsage(),
         )
@@ -108,7 +108,7 @@ class ResponseMapper:
 
         return VisionResponse(
             content=response.text,
-            provider=ProviderName.GEMINI,
+            provider=ProviderName.OLLAMA,
             model=model,
             usage=TokenUsage(),
         )
@@ -156,7 +156,7 @@ class ResponseMapper:
 
         return EmbeddingResponse(
             embedding=response.embeddings[0].values,
-            provider=ProviderName.GEMINI,
+            provider=ProviderName.OLLAMA,
             model=model,
             usage=TokenUsage(),
         )

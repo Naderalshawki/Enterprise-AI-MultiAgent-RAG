@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
-
-from fastapi import FastAPI, Request
+import httpx
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +32,7 @@ from src.services.schools_service import (
 )
 
 # ==========================================================
-# RAG Imports
+# RAG Imports (مشروعك)
 # ==========================================================
 from src.modules.rag.interfaces.router import rag_router
 from src.modules.rag.config.settings import rag_settings
@@ -55,24 +55,8 @@ query_engine_router = create_query_engine_router(
 async def lifespan(app: FastAPI):
     """
     إدارة دورة حياة تطبيق FastAPI.
-
-    Startup:
-        تشغيل التطبيق وتجهيز البيئة.
-
-    Shutdown:
-        إغلاق موارد قاعدة البيانات بشكل آمن.
     """
-
-    # ------------------------------------------------------
-    # Startup
-    # ------------------------------------------------------
-
     yield
-
-    # ------------------------------------------------------
-    # Shutdown
-    # ------------------------------------------------------
-
     await close_database()
 
 
@@ -91,10 +75,9 @@ app = FastAPI(
 )
 
 # ==========================================================
-# CORS Middleware (للسماح باتصال الواجهة بالسيرفر)
+# CORS Middleware
 # ==========================================================
 
-# قراءة إعدادات RAG للـ Origins ودمجها مع السماح العام
 rag_origins = [o.strip() for o in rag_settings.allowed_origins.split(",") if o.strip()]
 allowed_origins = ["*"] if not rag_origins else rag_origins + ["*"]
 
@@ -111,7 +94,6 @@ app.add_middleware(
 # Static Files & RAG UI
 # ==========================================================
 
-# تجهيز مجلد الملفات الثابتة (Static) الخاص بواجهة الـ RAG
 static_dir = Path(__file__).parent / "modules" / "rag" / "static"
 if static_dir.exists():
     app.mount("/rag_static", StaticFiles(directory=str(static_dir)), name="rag_static")
@@ -152,15 +134,48 @@ app.include_router(bi_agent_router)
 # ----------------------------------------------------------
 # Document Intelligence (RAG)
 # ----------------------------------------------------------
-# دمج راوتر رفع الملفات والبحث (prefix يمنع تعارض المسارات)
-# ----------------------------------------------------------
-# Document Intelligence (RAG)
-# ----------------------------------------------------------
 app.include_router(
     rag_router, 
     tags=["RAG & Document Intelligence"]
-
 )
+
+
+# ==========================================================
+# Proxy to Teammate's RAG Server (الربط مع سيرفر زميلك)
+# ==========================================================
+
+@app.api_route("/rag/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_to_rag(path: str, request: Request):
+    """
+    هذا الكود يربط مشروعك بمشروع زميلك.
+    أي طلب يبدأ بـ /rag بيتم تحويله لسيرفر زميلك (بورت 8001).
+    """
+    
+    # التعديل هنا: توجيه المسار لشكل زميلك
+    if path == "upload":
+        rag_url = "http://127.0.0.1:8001/api/v1/documents/upload"
+    else:
+        rag_url = f"http://127.0.0.1:8001/api/v1/{path}"
+    
+    body = await request.body()
+    headers = dict(request.headers)
+    headers.pop("host", None) 
+    
+    async with httpx.AsyncClient() as client:
+        req = client.build_request(
+            method=request.method,
+            url=rag_url,
+            headers=headers,
+            content=body,
+            params=request.query_params
+        )
+        response = await client.send(req)
+        
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers)
+        )
 
 
 # ==========================================================
@@ -190,4 +205,3 @@ async def root(request: Request):
             "rag_ui": "/rag_ui"
         }
     }
-

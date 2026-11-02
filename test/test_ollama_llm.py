@@ -13,7 +13,7 @@ async def test():
 
     request = LLMRequest(
         provider=ProviderName.OLLAMA,
-        model="llama3",  # <--- تم التعديل إلى النموذج المحلي الذي قمت بتنزيله
+        model="qwen2.5:1.5b",  # <--- تم التعديل إلى النموذج المحلي الذي قمت بتنزيله
         messages=[
             LLMMessage(
                 role=Role.USER,

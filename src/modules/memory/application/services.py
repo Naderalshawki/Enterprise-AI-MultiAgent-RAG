@@ -29,6 +29,10 @@ class MemoryService:
 
         return await self._repository.save(memory)
 
+    # ==========================================================
+    # Legacy Methods (القديمة)
+    # ==========================================================
+
     async def get_session_memories(
         self,
         session_id: str,
@@ -50,6 +54,26 @@ class MemoryService:
             user_id=user_id,
             limit=limit,
         )
+
+    # ==========================================================
+    # New Aliases (لتوافق مع AgentService الجديد)
+    # ==========================================================
+
+    async def get_by_session(
+        self,
+        session_id: str,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """Alias for get_session_memories."""
+        return await self.get_session_memories(session_id=session_id, limit=limit)
+
+    async def get_by_user(
+        self,
+        user_id: str,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """Alias for get_user_memories."""
+        return await self.get_user_memories(user_id=user_id, limit=limit)
 
     async def delete(
         self,

@@ -295,7 +295,7 @@ class GroqProvider(BaseProvider):
         ).rstrip("/")
 
         self.default_model = (
-            config.default_model or "gemini-3.8-flash"
+            config.default_model or "qwen2.5:1.5b"
         )
 
         self.headers = {

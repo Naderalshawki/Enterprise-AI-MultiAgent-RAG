@@ -41,6 +41,7 @@ class TaskExecutor:
         - إعادة المحاولة عند الفشل.
         - تشغيل الأدوات المسجلة.
         - تشغيل Analyzer / Reporter.
+        - دعم clarification requests بدون استدعاء LLM.
         - تخزين نتائج المهام داخل BIContext.
         - منع تنفيذ المهام المحجوبة.
         - تحديث حالة Plan.
@@ -113,6 +114,15 @@ class TaskExecutor:
             )
 
         # ------------------------------------------------------
+        # Propagate clarification metadata to context
+        # ------------------------------------------------------
+
+        self._propagate_plan_metadata(
+            plan=plan,
+            context=context,
+        )
+
+        # ------------------------------------------------------
         # Start plan
         # ------------------------------------------------------
 
@@ -165,9 +175,7 @@ class TaskExecutor:
             # Ready Tasks
             # ==================================================
 
-            ready_tasks = self._get_ready_tasks(
-                plan
-            )
+            ready_tasks = self._get_ready_tasks(plan)
 
             # ==================================================
             # No Ready Tasks
@@ -188,15 +196,9 @@ class TaskExecutor:
             # Execute Tasks
             # ==================================================
 
-            # تنفيذ أول مهمة جاهزة.
-            #
-            # لاحقًا يمكننا إضافة Parallel Execution
-            # للمهام المستقلة بدون تغيير الـDomain.
             task = ready_tasks[0]
 
-            plan.set_current_task(
-                task.id
-            )
+            plan.set_current_task(task.id)
 
             await self._execute_task(
                 task=task,
@@ -209,9 +211,7 @@ class TaskExecutor:
 
             if task.status == TaskStatus.FAILED:
 
-                self._skip_blocked_tasks(
-                    plan=plan,
-                )
+                self._skip_blocked_tasks(plan=plan)
 
         # ------------------------------------------------------
         # Final synchronization
@@ -233,6 +233,31 @@ class TaskExecutor:
         )
 
         return context
+
+    # ==========================================================
+    # Plan Metadata Propagation
+    # ==========================================================
+
+    @staticmethod
+    def _propagate_plan_metadata(
+        plan: Plan,
+        context: BIContext,
+    ) -> None:
+        """
+        نقل معلومات مهمة من Plan إلى BIContext قبل التنفيذ.
+
+        حالياً:
+            - requires_clarification
+            - clarification_reason
+        """
+
+        if plan.metadata.get("requires_clarification"):
+            context.metadata["requires_clarification"] = True
+
+            reason = plan.metadata.get("clarification_reason")
+
+            if reason:
+                context.metadata["clarification_reason"] = reason
 
     # ==========================================================
     # Task Execution
@@ -288,12 +313,8 @@ class TaskExecutor:
                 # Success
                 # ----------------------------------------------
 
-                task.mark_completed(
-                    result
-                )
+                task.mark_completed(result)
 
-                # نستخدم task.id وليس tool_name
-                # حتى لا يتم overwrite للمهام المتكررة.
                 context.set_tool_result(
                     task.id,
                     result,
@@ -379,20 +400,25 @@ class TaskExecutor:
         tool_name = task.tool_name
 
         # ------------------------------------------------------
+        # Clarification Short-Circuit
+        # ------------------------------------------------------
+
+        if task.inputs.get("clarification_required"):
+            logger.info(
+                "[Executor] Clarification request detected | task=%s",
+                task.id,
+            )
+            return self._build_clarification_result(task.inputs)
+
+        # ------------------------------------------------------
         # Registered Tool
         # ------------------------------------------------------
 
-        tool = self._tools.get(
-            tool_name
-        )
+        tool = self._tools.get(tool_name)
 
         if tool is not None:
 
-            execute = getattr(
-                tool,
-                "execute",
-                None,
-            )
+            execute = getattr(tool, "execute", None)
 
             if not callable(execute):
                 raise TypeError(
@@ -416,9 +442,7 @@ class TaskExecutor:
                     "AnalyzerAgent is not configured."
                 )
 
-            return await self._analyzer.execute(
-                context
-            )
+            return await self._analyzer.execute(context)
 
         # ------------------------------------------------------
         # Report Agent
@@ -431,9 +455,7 @@ class TaskExecutor:
                     "ReporterAgent is not configured."
                 )
 
-            return await self._reporter.execute(
-                context
-            )
+            return await self._reporter.execute(context)
 
         # ------------------------------------------------------
         # Unknown Tool
@@ -442,6 +464,26 @@ class TaskExecutor:
         raise LookupError(
             f"Tool '{tool_name}' is not registered."
         )
+
+    # ==========================================================
+    # Clarification Result Builder
+    # ==========================================================
+
+    @staticmethod
+    def _build_clarification_result(
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        بناء نتيجة موحدة لطلب التوضيح.
+        """
+
+        return {
+            "clarification_required": True,
+            "reason": inputs.get(
+                "clarification_reason",
+                "The question is ambiguous.",
+            ),
+        }
 
     # ==========================================================
     # Ready Tasks
@@ -470,10 +512,7 @@ class TaskExecutor:
         plan: Plan,
     ) -> None:
         """
-        تخطي جميع المهام التي تعتمد على:
-            FAILED
-            أو SKIPPED
-
+        تخطي جميع المهام التي تعتمد على FAILED أو SKIPPED
         بشكل مباشر أو غير مباشر.
         """
 
@@ -490,9 +529,7 @@ class TaskExecutor:
 
                 for dependency_id in task.depends_on:
 
-                    dependency = plan.get_task(
-                        dependency_id
-                    )
+                    dependency = plan.get_task(dependency_id)
 
                     if dependency is None:
                         continue
@@ -509,9 +546,7 @@ class TaskExecutor:
                             "did not complete successfully."
                         )
 
-                        task.mark_skipped(
-                            reason
-                        )
+                        task.mark_skipped(reason)
 
                         logger.warning(
                             "[Executor] %s",
@@ -573,9 +608,7 @@ class TaskExecutor:
                 "because its dependencies were not satisfied."
             )
 
-            task.mark_skipped(
-                reason
-            )
+            task.mark_skipped(reason)
 
             context.add_error(
                 "Executor",
@@ -598,9 +631,7 @@ class TaskExecutor:
         تسجيل فشل المهمة في Task وBIContext.
         """
 
-        task.mark_failed(
-            error
-        )
+        task.mark_failed(error)
 
         context.add_error(
             "Executor",
@@ -631,9 +662,7 @@ class TaskExecutor:
             error,
         )
 
-        plan.mark_failed(
-            error
-        )
+        plan.mark_failed(error)
 
         return context
 
@@ -676,7 +705,26 @@ class TaskExecutor:
     ) -> None:
         """
         مزامنة الحالة النهائية بين Plan وBIContext.
+
+        قاعدة مهمة:
+            - clarification ليس فشلاً.
+            - partial لا يمحو success إذا لا يوجد errors.
         """
+
+        requires_clarification = bool(
+            context.metadata.get("requires_clarification")
+        )
+
+        if requires_clarification:
+
+            # Clarification is a valid terminal state.
+            context.success = False
+
+            logger.info(
+                "[Executor] Plan ended with clarification request."
+            )
+
+            return
 
         if plan.status == PlanStatus.COMPLETED:
 
@@ -713,9 +761,7 @@ class TaskExecutor:
         إرجاع أداة بالاسم.
         """
 
-        return self._tools.get(
-            tool_name
-        )
+        return self._tools.get(tool_name)
 
     def register_tool(
         self,
@@ -740,11 +786,7 @@ class TaskExecutor:
                 "tool cannot be None."
             )
 
-        execute = getattr(
-            tool,
-            "execute",
-            None,
-        )
+        execute = getattr(tool, "execute", None)
 
         if not callable(execute):
             raise TypeError(
@@ -767,10 +809,7 @@ class TaskExecutor:
         إزالة Tool.
         """
 
-        tool = self._tools.pop(
-            tool_name,
-            None,
-        )
+        tool = self._tools.pop(tool_name, None)
 
         if tool is not None:
 

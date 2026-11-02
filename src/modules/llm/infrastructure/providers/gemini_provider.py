@@ -227,7 +227,7 @@
 #             for model in response:
 #                 models.append(
 #                     ModelInfo(
-#                         provider=ProviderName.GEMINI,
+#                         provider=ProviderName.OLLAMA,
 #                         model_name=model.name,
 #                         supports_stream=True,
 #                         supports_json=True,
@@ -526,7 +526,7 @@ class GeminiProvider(BaseProvider):
             for model in response:
                 models.append(
                     ModelInfo(
-                        provider=ProviderName.GEMINI,
+                        provider=ProviderName.OLLAMA,
                         model_name=model.name,
                         supports_stream=True,
                         supports_json=True,

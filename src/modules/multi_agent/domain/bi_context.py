@@ -28,6 +28,7 @@ class BIContext:
         7. Store tool execution results.
         8. Store sources and metadata.
         9. Collect errors without losing previous state.
+        10. Store trace steps for observability.
 
     This class does NOT:
         - call the LLM
@@ -174,6 +175,15 @@ class BIContext:
     # component without changing the core context structure.
     metadata: dict[str, Any] = field(
         default_factory=dict
+    )
+
+    # ==========================================================
+    # Execution Trace (للعرض في الواجهة)
+    # ==========================================================
+
+    # سجل زمني لخطوات تفكير الوكيل (Planner, Executor, Validator)
+    trace_steps: list[dict[str, Any]] = field(
+        default_factory=list
     )
 
     # ==========================================================
@@ -352,6 +362,7 @@ class BIContext:
             "has_analysis": bool(self.analysis_kpis),
             "has_report": bool(self.final_report),
             "tool_count": len(self.tool_results),
+            "trace_steps": len(self.trace_steps),
             "success": self.success,
             "error_count": len(self.errors),
         }

@@ -1,3 +1,12 @@
+---
+title: AI Business Intelligence Platform
+emoji: 📊
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
 # 🧠 AI Business Intelligence & Orchestrator Platform
 
 > ## 🎓 Graduation Project — Artificial Intelligence & Software Engineering

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from typing import Any
 
 from src.modules.llm.application.services import LLMService
 
@@ -14,9 +16,11 @@ from src.modules.memory.domain.value_objects import (
 
 from src.modules.multi_agent.agents.analyzer_agent import AnalyzerAgent
 from src.modules.multi_agent.agents.reporter_agent import ReporterAgent
+from src.modules.multi_agent.agents.result_validator import ResultValidatorAgent
 from src.modules.multi_agent.application.executor import TaskExecutor
 from src.modules.multi_agent.application.planner import Planner
 from src.modules.multi_agent.domain.bi_context import BIContext
+from src.modules.multi_agent.domain.contracts import ToolResult
 from src.modules.multi_agent.tools.database_tool import DatabaseTool
 from src.modules.multi_agent.tools.rag_tool import RAGTool
 
@@ -46,6 +50,8 @@ class AgentService:
      Database  RAG   Analysis
           \     |     /
               ↓
+         Result Validator (Self-Correction)
+              ↓
            Reporter
               ↓
          Final Response
@@ -60,6 +66,8 @@ class AgentService:
         - تمرير السياق بين المكونات.
         - حفظ النتيجة في Memory.
         - إدارة أخطاء orchestration.
+        - توفير عقد ToolResult للباك إند.
+        - تسجيل خطوات التنفيذ (Trace) للعرض في الواجهة.
 
     AgentService لا:
         - ينفذ SQL مباشرة.
@@ -79,6 +87,7 @@ class AgentService:
         query_engine: QueryEngine,
         memory_service: MemoryService | None = None,
         rag_service=None,
+        validator_agent: ResultValidatorAgent | None = None,
     ) -> None:
         """
         إنشاء AgentService.
@@ -96,50 +105,37 @@ class AgentService:
             MemoryService المسؤول عن قراءة وحفظ الذاكرة.
 
         rag_service:
-            تم دمجه مباشرة داخل RAGTool ولا داعي لاستخدامه هنا بعد الآن.
+            غير مستخدم حالياً. RAGTool يتصل مباشرة بنظام المستندات.
+
+        validator_agent:
+            وكيل التحقق الذاتي (Self-Correction).
         """
 
-        # ------------------------------------------------------
-        # Validate LLM
-        # ------------------------------------------------------
-
         if llm_service is None:
-            raise ValueError(
-                "llm_service cannot be None."
-            )
-
-        # ------------------------------------------------------
-        # Validate Query Engine
-        # ------------------------------------------------------
+            raise ValueError("llm_service cannot be None.")
 
         if query_engine is None:
-            raise ValueError(
-                "query_engine cannot be None."
-            )
+            raise ValueError("query_engine cannot be None.")
 
         self._llm = llm_service
         self._query_engine = query_engine
         self._memory = memory_service
+        self._validator = validator_agent
 
         # ======================================================
         # Planner
         # ======================================================
 
-        self.planner = Planner(
-            llm_service=self._llm,
-        )
+        self.planner = Planner(llm_service=self._llm)
 
         # ======================================================
         # Tools Registry
         # ======================================================
 
-        # تسجيل أدوات قاعدة البيانات والبحث في المستندات (RAG)
         self.tool_registry = {
             "DatabaseTool": DatabaseTool(
                 query_engine=self._query_engine,
             ),
-            # التعديل الرئيسي لحل الخطأ: 
-            # استدعاء RAGTool بدون أي وسائط لأنه يتصل مباشرة بنظام المستندات.
             "RAGTool": RAGTool(),
         }
 
@@ -147,13 +143,9 @@ class AgentService:
         # Specialist Agents
         # ======================================================
 
-        self.analyzer = AnalyzerAgent(
-            llm_service=self._llm,
-        )
+        self.analyzer = AnalyzerAgent(llm_service=self._llm)
 
-        self.reporter = ReporterAgent(
-            llm_service=self._llm,
-        )
+        self.reporter = ReporterAgent(llm_service=self._llm)
 
         # ======================================================
         # Executor
@@ -166,11 +158,11 @@ class AgentService:
         )
 
         logger.info(
-            "[AgentService] Initialized successfully with Database and RAG tools."
+            "[AgentService] Initialized successfully with Database, RAG, and Validator tools."
         )
 
     # ==========================================================
-    # Main Entry Point
+    # Public API (Primary) — returns BIContext
     # ==========================================================
 
     async def process_question(
@@ -178,39 +170,24 @@ class AgentService:
         question: str,
         user_id: str,
         session_id: str | None = None,
+        tenant_id: str = "default-tenant",
     ) -> BIContext:
         """
         معالجة سؤال المستخدم من البداية إلى النهاية.
-
-        Flow:
-
-            1. Validate Request
-            2. Create Context
-            3. Load Memory
-            4. Create Plan
-            5. Execute Plan
-            6. Synchronize Final State
-            7. Save Conversation Memory
-            8. Return BIContext
         """
 
         # ------------------------------------------------------
         # 1. Validate input
         # ------------------------------------------------------
 
-        question = self._normalize_question(
-            question
-        )
+        question = self._normalize_question(question)
 
         if not question:
 
             context = BIContext(
                 question="",
                 user_id=user_id,
-                session_id=(
-                    session_id
-                    or str(uuid.uuid4())
-                ),
+                session_id=(session_id or str(uuid.uuid4())),
             )
 
             context.add_error(
@@ -227,16 +204,13 @@ class AgentService:
         context = BIContext(
             question=question,
             user_id=user_id,
-            session_id=(
-                session_id
-                or str(uuid.uuid4())
-            ),
+            session_id=(session_id or str(uuid.uuid4())),
         )
 
         logger.info(
-            "[AgentService] Processing question | "
-            "session_id=%s",
+            "[AgentService] Processing question | session_id=%s | tenant_id=%s",
             context.session_id,
+            tenant_id,
         )
 
         try:
@@ -245,37 +219,33 @@ class AgentService:
             # 3. Load Memory
             # ==================================================
 
-            await self._load_memory_into_context(
-                context
-            )
+            await self._load_memory_into_context(context)
 
             # ==================================================
             # 4. Create Execution Plan
             # ==================================================
+            start_plan = time.time()
+            plan = await self._create_plan(question=context.question)
 
-            plan = await self._create_plan(
-                question=context.question,
-            )
+            context.trace_steps.append({
+                "step": "planning",
+                "title": "التخطيط (Planner)",
+                "duration_ms": int((time.time() - start_plan) * 1000),
+                "details": f"تم إنشاء خطة بـ {len(plan.tasks)} مهام."
+            })
 
             # --------------------------------------------------
-            # Save plan information for observability
+            # Record plan information for observability
             # --------------------------------------------------
 
             context.metadata["plan"] = {
-                "status": (
-                    "BLOCKED"
-                    if plan.metadata.get("blocked")
-                    else plan.status.value
-                ),
+                "status": plan.status.value,
                 "task_count": len(plan.tasks),
-                "generated_by": plan.metadata.get(
-                    "generated_by"
-                ),
-                "planner_model": plan.metadata.get(
-                    "planner_model"
-                ),
-                "detected_source": plan.metadata.get(
-                    "detected_source"
+                "generated_by": plan.metadata.get("generated_by"),
+                "planner_model": plan.metadata.get("planner_model"),
+                "detected_source": plan.metadata.get("detected_source"),
+                "requires_clarification": bool(
+                    plan.metadata.get("requires_clarification")
                 ),
             }
 
@@ -288,49 +258,44 @@ class AgentService:
                 plan=plan,
             )
 
-            # --------------------------------------------------
-            # A blocked plan means the question requires a source
-            # that is not available yet (currently document RAG).
-            # Do not send an empty plan to the executor, and never
-            # pretend a database-only query answered it.
-            # --------------------------------------------------
-
-            if plan.metadata.get("blocked"):
-                blocked_reason = str(
-                    plan.metadata.get(
-                        "blocked_reason",
-                        "The required data source is not available yet.",
-                    )
-                )
-
-                context.add_error(
-                    "AgentService",
-                    blocked_reason,
-                )
-                context.final_report = (
-                    "This question cannot be answered reliably yet "
-                    "because the required document retrieval service "
-                    "is not available. Please try again after RAG "
-                    "has been integrated."
-                )
-                context.metadata["plan"]["status"] = "BLOCKED"
-                context.metadata["plan"]["blocked_reason"] = blocked_reason
-
-                self._finalize_context(context)
-
-                logger.info(
-                    "[AgentService] Request blocked because required source is unavailable."
-                )
-                return context
-
             # ==================================================
             # 5. Execute Plan
             # ==================================================
-
+            start_exec = time.time()
             context = await self.executor.execute_plan(
                 plan=plan,
                 context=context,
             )
+
+            context.trace_steps.append({
+                "step": "execution",
+                "title": "التنفيذ (Executor)",
+                "duration_ms": int((time.time() - start_exec) * 1000),
+                "details": f"تم تنفيذ المهام. حالة الخطة: {plan.status.value}"
+            })
+
+            # ==================================================
+            # 5.5. Self-Correction (التحقق الجنائي)
+            # ==================================================
+            # 🔥 حماية: لا يعمل الـ Validator إلا إذا كان هناك تقرير نهائي حقيقي
+            
+            if self._validator and context.final_report and context.final_report.strip():
+                start_val = time.time()
+                context = await self._validator.execute(context)
+                
+                val_passed = context.metadata.get("validation_passed", False)
+                val_report = context.metadata.get("validation_report", {})
+                
+                details = "نجح التحقق من البيانات."
+                if not val_passed:
+                    details = f"فشل التحقق: {val_report.get('reason', 'سبب غير معروف')}"
+
+                context.trace_steps.append({
+                    "step": "validation",
+                    "title": "التحقق (Validator)",
+                    "duration_ms": int((time.time() - start_val) * 1000),
+                    "details": details
+                })
 
             # ==================================================
             # 6. Synchronize final plan metadata
@@ -339,17 +304,14 @@ class AgentService:
             context.metadata["plan"].update({
                 "status": plan.status.value,
                 "task_count": len(plan.tasks),
-                "completed_task_count": sum(
-                    1 for task in plan.tasks
-                    if str(getattr(task.status, "value", task.status)).upper() == "COMPLETED"
+                "completed_task_count": self._count_tasks_by_status(
+                    plan.tasks, "COMPLETED"
                 ),
-                "failed_task_count": sum(
-                    1 for task in plan.tasks
-                    if str(getattr(task.status, "value", task.status)).upper() == "FAILED"
+                "failed_task_count": self._count_tasks_by_status(
+                    plan.tasks, "FAILED"
                 ),
-                "skipped_task_count": sum(
-                    1 for task in plan.tasks
-                    if str(getattr(task.status, "value", task.status)).upper() == "SKIPPED"
+                "skipped_task_count": self._count_tasks_by_status(
+                    plan.tasks, "SKIPPED"
                 ),
             })
 
@@ -357,48 +319,137 @@ class AgentService:
             # 7. Final State Synchronization
             # ==================================================
 
-            self._finalize_context(
-                context
-            )
+            self._finalize_context(context)
 
             # ==================================================
-            # 7. Save Memory
+            # 8. Save Memory (skip if clarification)
             # ==================================================
 
-            if self._should_save_memory(
-                context
-            ):
-                await self._save_memory(
-                    context
-                )
+            if self._should_save_memory(context):
+                await self._save_memory(context, tenant_id=tenant_id)
 
             logger.info(
                 "[AgentService] Processing completed | "
-                "success=%s | errors=%d",
+                "success=%s | errors=%d | clarification=%s",
                 context.success,
                 len(context.errors),
+                bool(context.metadata.get("requires_clarification")),
             )
 
             return context
 
         except Exception as exc:
 
-            # ==================================================
-            # Fatal Orchestration Error
-            # ==================================================
-
             logger.exception(
                 "[AgentService] Fatal orchestration error."
             )
 
-            context.add_error(
-                "AgentService",
-                str(exc),
-            )
+            context.add_error("AgentService", str(exc))
 
             context.success = False
 
             return context
+
+    # ==========================================================
+    # Public API (Backend Contract) — returns ToolResult
+    # ==========================================================
+
+    async def process_question_as_tool_result(
+        self,
+        question: str,
+        user_id: str,
+        session_id: str | None = None,
+        tenant_id: str = "default-tenant",
+    ) -> ToolResult:
+        """
+        نسخة من process_question ترجع ToolResult.
+        """
+
+        try:
+            context = await self.process_question(
+                question=question,
+                user_id=user_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "[AgentService] process_question_as_tool_result failed."
+            )
+
+            return ToolResult(
+                status="tool_error",
+                tool_name="multi_agent_orchestrator",
+                data={
+                    "answer": "",
+                    "chart": None,
+                    "trace": [],
+                },
+                sources=[],
+                warnings=[str(exc)],
+                error_code="AGENT_SERVICE_FATAL",
+                trace_id=session_id,
+            )
+
+        return self._context_to_tool_result(context)
+
+    # ==========================================================
+    # Context → ToolResult
+    # ==========================================================
+
+    @staticmethod
+    def _context_to_tool_result(
+        context: BIContext,
+    ) -> ToolResult:
+
+        requires_clarification = bool(
+            context.metadata.get("requires_clarification")
+        )
+
+        has_answer = bool(
+            context.final_report
+            and context.final_report.strip()
+        )
+
+        if requires_clarification:
+            status = "insufficient_evidence"
+
+        elif not has_answer and not context.errors:
+            status = "no_results"
+
+        elif not context.success:
+            status = "tool_error"
+
+        else:
+            status = "success"
+
+        sources: list[dict] = []
+
+        for src in context.selected_sources or []:
+            sources.append({"name": src})
+
+        data = {
+            "answer": context.final_report or "",
+            "chart": context.chart_config or None,
+            "source_type": context.source_type,
+            "sql": context.sql_query,
+            "row_count": len(context.raw_data or []),
+            "trace": context.trace_steps,
+        }
+
+        warnings = list(context.errors or [])
+
+        return ToolResult(
+            status=status,
+            tool_name="multi_agent_orchestrator",
+            data=data,
+            sources=sources,
+            warnings=warnings,
+            error_code=None,
+            trace_id=context.session_id,
+        )
 
     # ==========================================================
     # Plan Creation
@@ -408,27 +459,16 @@ class AgentService:
         self,
         question: str,
     ):
-        """
-        إنشاء Execution Plan باستخدام Planner.
-        """
-
-        plan = await self.planner.create_plan(
-            question
-        )
+        plan = await self.planner.create_plan(question)
 
         if plan is None:
-            raise RuntimeError(
-                "Planner returned None."
-            )
+            raise RuntimeError("Planner returned None.")
 
         if plan.is_empty:
-            raise RuntimeError(
-                "Planner returned an empty plan."
-            )
+            raise RuntimeError("Planner returned an empty plan.")
 
         logger.info(
-            "[AgentService] Plan created | "
-            "tasks=%d",
+            "[AgentService] Plan created | tasks=%d",
             len(plan.tasks),
         )
 
@@ -443,18 +483,6 @@ class AgentService:
         context: BIContext,
         limit: int = 10,
     ) -> None:
-        """
-        استرجاع الذاكرة المناسبة ووضعها داخل BIContext.
-
-        الأولوية:
-
-            Session Memory
-                ↓
-            User Memory
-
-        إذا حدث خطأ في Memory:
-            لا نوقف الـAgent.
-        """
 
         if self._memory is None:
             return
@@ -463,70 +491,35 @@ class AgentService:
 
             memories = []
 
-            # --------------------------------------------------
-            # Session Memory
-            # --------------------------------------------------
-
             if context.session_id:
-
-                memories = (
-                    await self._memory.get_session_memories(
-                        session_id=context.session_id,
-                        limit=limit,
-                    )
+                memories = await self._memory.get_by_session(
+                    session_id=context.session_id,
+                    limit=limit,
                 )
 
-            # --------------------------------------------------
-            # User Memory fallback
-            # --------------------------------------------------
-
-            if (
-                not memories
-                and context.user_id
-            ):
-
-                memories = (
-                    await self._memory.get_user_memories(
-                        user_id=context.user_id,
-                        limit=limit,
-                    )
+            if not memories and context.user_id:
+                memories = await self._memory.get_by_user(
+                    user_id=context.user_id,
+                    limit=limit,
                 )
 
             if not memories:
                 return
 
-            # --------------------------------------------------
-            # Convert Memory to Context
-            # --------------------------------------------------
+            memory_lines = [
+                f"[{memory.memory_type.value}] {memory.content}"
+                for memory in memories
+            ]
 
-            memory_lines = []
-
-            for memory in memories:
-
-                memory_lines.append(
-                    f"[{memory.memory_type.value}] "
-                    f"{memory.content}"
-                )
-
-            memory_context = "\n".join(
-                memory_lines
-            ).strip()
+            memory_context = "\n".join(memory_lines).strip()
 
             if not memory_context:
                 return
 
-            context.memory_context = (
-                memory_context
-            )
+            context.memory_context = memory_context
 
-            # Keep backward-compatible metadata.
-            context.metadata[
-                "memory_context"
-            ] = memory_context
-
-            context.metadata[
-                "memory_count"
-            ] = len(memories)
+            context.metadata["memory_context"] = memory_context
+            context.metadata["memory_count"] = len(memories)
 
             logger.info(
                 "[AgentService] Loaded %d memories.",
@@ -534,9 +527,6 @@ class AgentService:
             )
 
         except Exception as exc:
-
-            # Memory is auxiliary.
-            # Its failure must never stop the request.
 
             logger.warning(
                 "[AgentService] Memory loading failed: %s",
@@ -552,22 +542,11 @@ class AgentService:
         context: BIContext,
         plan,
     ) -> None:
-        """
-        تحديد مصادر البيانات المتوقعة من الخطة.
 
-        DatabaseTool -> database
-        RAGTool      -> document
-
-        هذا لا ينفذ أي شيء.
-        هو فقط يسجل قرار الـPlanner داخل السياق.
-        """
-
-        sources = {
-            task.tool_name
-            for task in plan.tasks
-        }
+        sources = {task.tool_name for task in plan.tasks}
 
         detected_source = plan.metadata.get("detected_source")
+
         has_database = (
             "DatabaseTool" in sources
             or detected_source == "both"
@@ -578,83 +557,69 @@ class AgentService:
             or detected_source in ("document", "both")
         )
 
-        # ------------------------------------------------------
-        # Both
-        # ------------------------------------------------------
-
         if has_database and has_rag:
 
             context.source_type = "both"
 
-            context.add_source(
-                "database"
-            )
-
-            context.add_source(
-                "rag"
-            )
-
-        # ------------------------------------------------------
-        # Database
-        # ------------------------------------------------------
+            context.add_source("database")
+            context.add_source("rag")
 
         elif has_database:
 
             context.source_type = "database"
-
-            context.add_source(
-                "database"
-            )
-
-        # ------------------------------------------------------
-        # Document
-        # ------------------------------------------------------
+            context.add_source("database")
 
         elif has_rag:
 
             context.source_type = "document"
-
-            context.add_source(
-                "rag"
-            )
-
-        # ------------------------------------------------------
-        # Unknown
-        # ------------------------------------------------------
+            context.add_source("rag")
 
         else:
 
             context.source_type = "unknown"
 
     # ==========================================================
+    # Task Counting Helper
+    # ==========================================================
+
+    @staticmethod
+    def _count_tasks_by_status(
+        tasks: list,
+        status_name: str,
+    ) -> int:
+
+        return sum(
+            1
+            for task in tasks
+            if str(
+                getattr(task.status, "value", task.status)
+            ).upper() == status_name
+        )
+
+    # ==========================================================
     # Finalization
     # ==========================================================
 
     @staticmethod
-    def _finalize_context(
-        context: BIContext,
-    ) -> None:
-        """
-        المزامنة النهائية لحالة BIContext.
+    def _finalize_context(context: BIContext) -> None:
 
-        النجاح الحقيقي يعني:
-            - لا توجد أخطاء.
-            - يوجد تقرير نهائي عندما تكون الخطة مكتملة.
-        """
+        if context.metadata.get("requires_clarification"):
 
-        # ------------------------------------------------------
-        # Existing errors always win
-        # ------------------------------------------------------
+            if context.final_report and context.final_report.strip():
+                context.success = True
+                return
+
+            context.add_error(
+                "AgentService",
+                "Clarification requested but no message generated.",
+            )
+            context.success = False
+            return
 
         if context.errors:
 
             context.success = False
-
             return
-
-        # ------------------------------------------------------
-        # Report validation
-        # ------------------------------------------------------
 
         if not context.final_report:
 
@@ -664,7 +629,6 @@ class AgentService:
             )
 
             context.success = False
-
             return
 
         context.success = True
@@ -674,18 +638,14 @@ class AgentService:
     # ==========================================================
 
     @staticmethod
-    def _should_save_memory(
-        context: BIContext,
-    ) -> bool:
-        """
-        تحديد هل يجب حفظ المحادثة.
-        """
+    def _should_save_memory(context: BIContext) -> bool:
+
+        if context.metadata.get("requires_clarification"):
+            return False
 
         return (
             context.success
-            and bool(
-                context.question.strip()
-            )
+            and bool(context.question.strip())
             and bool(
                 context.final_report
                 and context.final_report.strip()
@@ -696,19 +656,7 @@ class AgentService:
     # Memory Saving
     # ==========================================================
 
-    async def _save_memory(
-        self,
-        context: BIContext,
-    ) -> None:
-        """
-        حفظ دورة المحادثة كاملة داخل MemoryService.
-
-        يتم حفظ:
-
-            User Question
-                +
-            Assistant Final Report
-        """
+    async def _save_memory(self, context: BIContext, tenant_id: str) -> None:
 
         if self._memory is None:
             return
@@ -730,21 +678,17 @@ class AgentService:
                     "source": "multi_agent",
                     "source_type": context.source_type,
                     "success": context.success,
+                    "tenant_id": tenant_id,
                 },
             )
 
-            await self._memory.save(
-                request
-            )
+            await self._memory.save(request)
 
             logger.info(
                 "[AgentService] Conversation saved to memory."
             )
 
         except Exception as exc:
-
-            # Saving memory is secondary.
-            # Do not destroy a successful BI response.
 
             logger.warning(
                 "[AgentService] Memory save failed: %s",
@@ -756,16 +700,9 @@ class AgentService:
     # ==========================================================
 
     @staticmethod
-    def _normalize_question(
-        question: str | None,
-    ) -> str:
-        """
-        تنظيف سؤال المستخدم.
-        """
+    def _normalize_question(question: str | None) -> str:
 
         if question is None:
             return ""
 
-        return " ".join(
-            str(question).strip().split()
-        )
+        return " ".join(str(question).strip().split())
