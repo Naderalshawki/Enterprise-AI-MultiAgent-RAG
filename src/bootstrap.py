@@ -100,7 +100,7 @@ PROVIDER_CONFIG = {
     ProviderName.OLLAMA: {
         "env": "OLLAMA_API_KEY",
         "model_env": "OLLAMA_MODEL",
-        "default_model": "qwen2.5:1.5b",
+        "default_model": "qwen2.5-coder:7b",
         "requires_api_key": False,
     },
     ProviderName.GEMINI: {

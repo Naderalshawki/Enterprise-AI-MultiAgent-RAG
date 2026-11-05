@@ -205,11 +205,10 @@
 #             "rag_ui": "/rag_ui"
 #         }
 #     }
-
-
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Request
+import httpx
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -346,6 +345,38 @@ app.include_router(
     rag_router, 
     tags=["RAG & Document Intelligence"]
 )
+
+
+# ==========================================================
+# API Gateway to RAG Service (الربط عبر API)
+# ==========================================================
+
+@app.api_route("/rag/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_to_rag(path: str, request: Request):
+    """
+    يوجه طلبات الـ RAG من الواجهة إلى خدمة RAG المستقلة (بورت 8001).
+    """
+    rag_url = f"http://127.0.0.1:8001/api/v1/rag/{path}"
+    
+    body = await request.body()
+    headers = dict(request.headers)
+    headers.pop("host", None) 
+    
+    async with httpx.AsyncClient() as client:
+        req = client.build_request(
+            method=request.method,
+            url=rag_url,
+            headers=headers,
+            content=body,
+            params=request.query_params
+        )
+        response = await client.send(req)
+        
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers)
+        )
 
 
 # ==========================================================

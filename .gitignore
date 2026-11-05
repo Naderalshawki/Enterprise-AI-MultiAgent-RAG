@@ -1,25 +1,21 @@
-﻿# Secrets
-.env
-.env.*
-!.env.example
-
-# Python virtual environments
-.venv/
-venv/
-env/
-
-# Python cache
+﻿# Python cache
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Testing and tools
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# Environment variables
+.env
 
-# IDE and OS
-.vscode/
-.idea/
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Local Vector Database & Caches
+chromadb/
+data/
+*.log
+
+# OS files
 .DS_Store
 Thumbs.db
-
