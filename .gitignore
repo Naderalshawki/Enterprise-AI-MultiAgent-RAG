@@ -19,3 +19,10 @@ data/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Vector Databases & Caches
+chroma_db/
+*.sqlite3
+*.sqlite
+vector_storage/
+src/data/vector_storage/
