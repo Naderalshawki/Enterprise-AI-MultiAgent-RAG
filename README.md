@@ -5,7 +5,7 @@
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Search-orange.svg)](https://www.trychroma.com/)
 [![Supabase](https://img.shields.io/badge/Supabase-Database-green.svg)](https://supabase.com/)
 
-# 🧠 AI Core & Multi-Agent Intelligence
+# 🧠 Enterprise-AI-MultiAgent-RAG
 ### An AI-Agent-Based Business Intelligence Platform for Analyzing Databases and Documents
 
 <p align="center">
